@@ -1,63 +1,52 @@
 import 'package:flutter/material.dart';
-import 'dart:async';
+import 'package:resilient_middleware_flutter/resilient_middleware.dart';
+import 'screens/home_screen.dart';
 
-import 'package:flutter/services.dart';
-import 'package:resilient_middleware_flutter/resilient_middleware_flutter.dart';
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
 
-void main() {
-  runApp(const MyApp());
+  // Initialize Resilient Middleware
+  await ResilientMiddleware.initialize(
+    smsGateway: '+22670000000', // Demo SMS gateway number
+    enableSMS: true,
+    strategy: ResilienceStrategy.balanced,
+    timeout: const Duration(seconds: 30),
+    maxQueueSize: 1000,
+  );
+
+  // Enable logging
+  Logger.setEnabled(true);
+  Logger.setMinLevel(LogLevel.debug);
+
+  runApp(const BankingDemoApp());
 }
 
-class MyApp extends StatefulWidget {
-  const MyApp({super.key});
-
-  @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
-  String _platformVersion = 'Unknown';
-  final _resilientMiddlewareFlutterPlugin = ResilientMiddlewareFlutter();
-
-  @override
-  void initState() {
-    super.initState();
-    initPlatformState();
-  }
-
-  // Platform messages are asynchronous, so we initialize in an async method.
-  Future<void> initPlatformState() async {
-    String platformVersion;
-    // Platform messages may fail, so we use a try/catch PlatformException.
-    // We also handle the message potentially returning null.
-    try {
-      platformVersion =
-          await _resilientMiddlewareFlutterPlugin.getPlatformVersion() ?? 'Unknown platform version';
-    } on PlatformException {
-      platformVersion = 'Failed to get platform version.';
-    }
-
-    // If the widget was removed from the tree while the asynchronous platform
-    // message was in flight, we want to discard the reply rather than calling
-    // setState to update our non-existent appearance.
-    if (!mounted) return;
-
-    setState(() {
-      _platformVersion = platformVersion;
-    });
-  }
+class BankingDemoApp extends StatelessWidget {
+  const BankingDemoApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Plugin example app'),
+      title: 'Resilient Banking Demo',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blue,
+          brightness: Brightness.light,
         ),
-        body: Center(
-          child: Text('Running on: $_platformVersion\n'),
+        useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          centerTitle: true,
+          elevation: 0,
+        ),
+        cardTheme: CardTheme(
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
         ),
       ),
+      home: const HomeScreen(),
+      debugShowCheckedModeBanner: false,
     );
   }
 }
