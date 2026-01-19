@@ -8,6 +8,7 @@ class Response {
   final Map<String, String> headers;
   final bool isFromCache;
   final bool isFromSMS;
+  final String? requestId; // ID of the queued request (if queued)
 
   Response({
     required this.statusCode,
@@ -15,6 +16,7 @@ class Response {
     this.headers = const {},
     this.isFromCache = false,
     this.isFromSMS = false,
+    this.requestId,
   });
 
   bool get isSuccess => statusCode >= 200 && statusCode < 300;
@@ -26,6 +28,7 @@ class Response {
       'headers': headers,
       'isFromCache': isFromCache,
       'isFromSMS': isFromSMS,
+      'requestId': requestId,
     };
   }
 
@@ -36,6 +39,7 @@ class Response {
       headers: Map<String, String>.from(json['headers'] as Map? ?? {}),
       isFromCache: json['isFromCache'] as bool? ?? false,
       isFromSMS: json['isFromSMS'] as bool? ?? false,
+      requestId: json['requestId'] as String?,
     );
   }
 }

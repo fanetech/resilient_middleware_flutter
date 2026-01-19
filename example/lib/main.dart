@@ -8,7 +8,7 @@ void main() async {
   // Initialize Resilient Middleware
   await ResilientMiddleware.initialize(
     smsGateway: '+22670000000', // Demo SMS gateway number
-    enableSMS: true,
+    enableSMS: false,
     strategy: ResilienceStrategy.balanced,
     timeout: const Duration(seconds: 30),
     maxQueueSize: 1000,

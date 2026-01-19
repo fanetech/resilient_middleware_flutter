@@ -4,10 +4,17 @@ library;
 import 'dart:async';
 import 'package:crypto/crypto.dart';
 import 'dart:convert';
+import 'package:http/http.dart' as http;
 import '../models/queue_item.dart';
 import '../models/request_model.dart';
 import '../database/offline_database.dart';
 import '../utils/logger.dart';
+
+/// Callback for when a queued request completes successfully
+typedef OnRequestCompleted = void Function(String requestId, int statusCode, String body);
+
+/// Callback for when a queued request fails
+typedef OnRequestFailed = void Function(String requestId, String error);
 
 /// Queue manager for handling offline requests
 class QueueManager {
@@ -17,6 +24,13 @@ class QueueManager {
 
   final OfflineDatabase _database = OfflineDatabase();
   Timer? _processTimer;
+
+  /// Callbacks for request completion
+  OnRequestCompleted? onRequestCompleted;
+  OnRequestFailed? onRequestFailed;
+
+  /// HTTP timeout for retry attempts
+  Duration httpTimeout = const Duration(seconds: 30);
 
   /// Initialize queue manager
   Future<void> initialize() async {
@@ -103,15 +117,13 @@ class QueueManager {
       // Mark as processing
       await updateStatus(queuedRequest.id, QueueStatus.processing);
 
-      Logger.debug('Processing queued request: ${queuedRequest.id}');
-
-      // This will be called by ResilientMiddleware when network is available
-      // For now, we just update the status and wait for the API to retry
+      Logger.info('Processing queued request: ${queuedRequest.id} - ${queuedRequest.request.method} ${queuedRequest.request.url}');
 
       // Check if max retries reached
       if (queuedRequest.hasReachedMaxRetries) {
-        Logger.warning('Request ${queuedRequest.id} reached max retries');
+        Logger.warning('Request ${queuedRequest.id} reached max retries (${queuedRequest.retryCount}/${queuedRequest.maxRetries})');
         await updateStatus(queuedRequest.id, QueueStatus.failed);
+        onRequestFailed?.call(queuedRequest.id, 'Max retries reached');
         return;
       }
 
@@ -120,15 +132,86 @@ class QueueManager {
         Logger.warning('Request ${queuedRequest.id} has expired');
         await updateStatus(queuedRequest.id, QueueStatus.expired);
         await delete(queuedRequest.id);
+        onRequestFailed?.call(queuedRequest.id, 'Request expired');
         return;
       }
 
-      // Reset to pending for retry
-      await updateStatus(queuedRequest.id, QueueStatus.pending);
+      // Actually execute the HTTP request
+      final response = await _executeHttpRequest(queuedRequest);
+
+      if (response != null && response.statusCode >= 200 && response.statusCode < 300) {
+        // Success - mark as completed and remove from queue
+        Logger.info('Queued request ${queuedRequest.id} completed successfully with status ${response.statusCode}');
+        await updateStatus(queuedRequest.id, QueueStatus.completed);
+        await delete(queuedRequest.id);
+        onRequestCompleted?.call(queuedRequest.id, response.statusCode, response.body);
+      } else {
+        // Failed - increment retry count
+        final statusCode = response?.statusCode ?? 0;
+        Logger.warning('Queued request ${queuedRequest.id} failed with status $statusCode, will retry');
+        await incrementRetryCount(queuedRequest.id);
+        onRequestFailed?.call(queuedRequest.id, 'HTTP error: $statusCode');
+      }
 
     } catch (e, stackTrace) {
       Logger.error('Failed to process queued request ${queuedRequest.id}', e, stackTrace);
       await incrementRetryCount(queuedRequest.id);
+      onRequestFailed?.call(queuedRequest.id, e.toString());
+    }
+  }
+
+  /// Execute HTTP request for a queued item
+  Future<http.Response?> _executeHttpRequest(QueuedRequest queuedRequest) async {
+    try {
+      final request = queuedRequest.request;
+      final uri = Uri.parse(request.url);
+
+      // Prepare body for POST/PUT requests
+      String? bodyString;
+      if (request.body != null) {
+        bodyString = json.encode(request.body);
+      }
+
+      Logger.debug('Executing HTTP ${request.method} to ${request.url}');
+
+      http.Response response;
+      switch (request.method.toUpperCase()) {
+        case 'GET':
+          response = await http.get(uri, headers: request.headers)
+              .timeout(httpTimeout);
+          break;
+        case 'POST':
+          response = await http.post(
+            uri,
+            headers: request.headers,
+            body: bodyString,
+          ).timeout(httpTimeout);
+          break;
+        case 'PUT':
+          response = await http.put(
+            uri,
+            headers: request.headers,
+            body: bodyString,
+          ).timeout(httpTimeout);
+          break;
+        case 'DELETE':
+          response = await http.delete(uri, headers: request.headers)
+              .timeout(httpTimeout);
+          break;
+        default:
+          Logger.error('Unsupported HTTP method: ${request.method}');
+          return null;
+      }
+
+      Logger.debug('HTTP response: ${response.statusCode}');
+      return response;
+
+    } on TimeoutException {
+      Logger.warning('HTTP request timeout for queued request ${queuedRequest.id}');
+      return null;
+    } catch (e, stackTrace) {
+      Logger.error('HTTP request failed for queued request ${queuedRequest.id}', e, stackTrace);
+      return null;
     }
   }
 

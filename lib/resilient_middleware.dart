@@ -70,6 +70,8 @@ export 'src/utils/sms_compressor.dart';
 export 'src/database/offline_database.dart';
 
 import 'dart:convert';
+import 'package:resilient_middleware_flutter/src/utils/logger.dart';
+
 import 'src/core/resilient_api.dart';
 import 'src/models/request_model.dart';
 import 'src/models/response_model.dart';

@@ -1,6 +1,7 @@
 /// Queue item model for offline request storage
 library;
 
+import 'dart:convert';
 import 'request_model.dart';
 
 /// Status of a queued request
@@ -67,10 +68,12 @@ class QueuedRequest {
       'id': id,
       'method': request.method,
       'url': request.url,
-      'headers': request.headers != null ?
-          request.headers.toString() : null,
-      'body': request.body != null ?
-          request.body.toString() : null,
+      'headers': request.headers != null
+          ? jsonEncode(request.headers)
+          : null,
+      'body': request.body != null
+          ? jsonEncode(request.body)
+          : null,
       'priority': request.priority.value,
       'retry_count': retryCount,
       'max_retries': maxRetries,
@@ -82,16 +85,89 @@ class QueuedRequest {
     };
   }
 
+  /// Parse a string that could be JSON or Dart Map.toString() format
+  static Map<String, String>? _parseMapString(String data) {
+    // Try JSON first
+    try {
+      return Map<String, String>.from(jsonDecode(data) as Map);
+    } catch (_) {
+      // Fall back to parsing Dart toString format: {key: value, key2: value2}
+      return _parseDartMapToString(data);
+    }
+  }
+
+  /// Parse a string that could be JSON or Dart Map.toString() format (dynamic values)
+  static Map<String, dynamic>? _parseMapStringDynamic(String data) {
+    // Try JSON first
+    try {
+      return jsonDecode(data) as Map<String, dynamic>;
+    } catch (_) {
+      // Fall back to parsing Dart toString format
+      final result = _parseDartMapToString(data);
+      return result != null ? Map<String, dynamic>.from(result) : null;
+    }
+  }
+
+  /// Parse Dart's Map.toString() format: {key: value, key2: value2}
+  static Map<String, String>? _parseDartMapToString(String data) {
+    try {
+      // Remove outer braces
+      String inner = data.trim();
+      if (inner.startsWith('{') && inner.endsWith('}')) {
+        inner = inner.substring(1, inner.length - 1);
+      }
+
+      if (inner.isEmpty) return {};
+
+      final result = <String, String>{};
+      // Split by comma, but be careful with values that might contain commas
+      final pairs = inner.split(RegExp(r',\s*(?=[^:]+:)'));
+
+      for (final pair in pairs) {
+        final colonIndex = pair.indexOf(':');
+        if (colonIndex != -1) {
+          final key = pair.substring(0, colonIndex).trim();
+          final value = pair.substring(colonIndex + 1).trim();
+          result[key] = value;
+        }
+      }
+
+      return result;
+    } catch (_) {
+      return null;
+    }
+  }
+
   factory QueuedRequest.fromJson(Map<String, dynamic> json) {
+    // Parse headers from JSON string or Dart toString format
+    Map<String, String>? headers;
+    if (json['headers'] != null) {
+      final headersData = json['headers'];
+      if (headersData is String) {
+        headers = _parseMapString(headersData);
+      } else if (headersData is Map) {
+        headers = Map<String, String>.from(headersData);
+      }
+    }
+
+    // Parse body from JSON string or Dart toString format
+    Map<String, dynamic>? body;
+    if (json['body'] != null) {
+      final bodyData = json['body'];
+      if (bodyData is String) {
+        body = _parseMapStringDynamic(bodyData);
+      } else if (bodyData is Map) {
+        body = Map<String, dynamic>.from(bodyData);
+      }
+    }
+
     return QueuedRequest(
       id: json['id'] as String,
       request: Request(
         method: json['method'] as String,
         url: json['url'] as String,
-        headers: json['headers'] != null
-            ? Map<String, String>.from(json['headers'] as Map)
-            : null,
-        body: json['body'] as Map<String, dynamic>?,
+        headers: headers,
+        body: body,
         priority: Priority.values.firstWhere(
           (p) => p.value == json['priority'],
           orElse: () => Priority.normal,

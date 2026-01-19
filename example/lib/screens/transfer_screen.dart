@@ -61,9 +61,12 @@ class _TransferScreenState extends State<TransferScreen> {
         smsEligible: _smsEligible,
       );
 
-      // Create transaction
+      Logger.info('Sending transfer request: $response');
+
+      // Create transaction - use requestId from response if queued
+      final transactionId = response.requestId ?? Random().nextInt(10000).toString();
       final transaction = Transaction(
-        id: Random().nextInt(10000).toString(),
+        id: transactionId,
         type: 'sent',
         amount: amount,
         recipient: _recipientController.text,

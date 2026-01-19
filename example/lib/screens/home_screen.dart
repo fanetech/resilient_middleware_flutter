@@ -21,6 +21,73 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadDemoData();
+    _setupQueueListener();
+  }
+
+  @override
+  void dispose() {
+    // Remove the callbacks when disposing
+    QueueManager().onRequestCompleted = null;
+    super.dispose();
+  }
+
+  /// Setup listener for queue completion events
+  void _setupQueueListener() {
+    final queueManager = QueueManager();
+
+    // Listen for successful queue completions
+    queueManager.onRequestCompleted = (requestId, statusCode, body) {
+      Logger.info('Queue request completed: $requestId with status $statusCode');
+
+      // Find the queued transaction and update its status
+      setState(() {
+        for (int i = 0; i < _recentTransactions.length; i++) {
+          final tx = _recentTransactions[i];
+          // Match by ID (transaction ID now equals request ID for queued items)
+          if (tx.id == requestId && tx.status == 'queued') {
+            _recentTransactions[i] = Transaction(
+              id: tx.id,
+              type: tx.type,
+              amount: tx.amount,
+              recipient: tx.recipient,
+              timestamp: tx.timestamp,
+              status: 'completed',
+              isFromSMS: tx.isFromSMS,
+            );
+            // Deduct balance for newly completed transaction
+            _balance -= tx.amount;
+            Logger.info('Transaction ${tx.id} updated to completed');
+            break;
+          }
+        }
+      });
+    };
+
+    // Listen for failed queue requests
+    queueManager.onRequestFailed = (requestId, error) {
+      Logger.warning('Queue request failed: $requestId - $error');
+
+      setState(() {
+        for (int i = 0; i < _recentTransactions.length; i++) {
+          final tx = _recentTransactions[i];
+          if (tx.id == requestId && tx.status == 'queued') {
+            // Keep as queued if it will retry, or mark as failed if max retries reached
+            if (error == 'Max retries reached') {
+              _recentTransactions[i] = Transaction(
+                id: tx.id,
+                type: tx.type,
+                amount: tx.amount,
+                recipient: tx.recipient,
+                timestamp: tx.timestamp,
+                status: 'failed',
+                isFromSMS: tx.isFromSMS,
+              );
+            }
+            break;
+          }
+        }
+      });
+    };
   }
 
   void _loadDemoData() {

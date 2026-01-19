@@ -175,11 +175,13 @@ class ResilientMiddleware {
         return await _queueWithSMSFallback(request, const Duration(minutes: 1));
       }
 
-      return await _queueRequest(request).then((_) => Response(
+      final requestId = await _queueRequest(request);
+      return Response(
         statusCode: 202,
         body: 'Request queued for retry',
         isFromCache: true,
-      ));
+        requestId: requestId,
+      );
     }
 
     // BALANCED Strategy: Smart detection, reasonable wait
@@ -200,11 +202,12 @@ class ResilientMiddleware {
           return await _queueWithSMSFallback(request, _smsThreshold);
         } else {
           // Normal priority - just queue
-          await _queueRequest(request);
+          final requestId = await _queueRequest(request);
           return Response(
             statusCode: 202,
             body: 'Request queued for later processing',
             isFromCache: true,
+            requestId: requestId,
           );
         }
       } else {
@@ -220,7 +223,7 @@ class ResilientMiddleware {
         return await _tryHTTP(request, _timeout);
       } else {
         // Queue for all poor network conditions
-        await _queueRequest(request);
+        final requestId = await _queueRequest(request);
 
         // Only use SMS for critical requests after long wait
         if (request.priority == Priority.critical && _enableSMS && request.smsEligible) {
@@ -231,6 +234,7 @@ class ResilientMiddleware {
           statusCode: 202,
           body: 'Request queued - network quality insufficient',
           isFromCache: true,
+          requestId: requestId,
         );
       }
     }
@@ -241,10 +245,8 @@ class ResilientMiddleware {
 
   /// Queue request with SMS fallback after threshold
   Future<Response> _queueWithSMSFallback(Request request, Duration threshold) async {
-    await _queueRequest(request);
-
-    // Set up timer for SMS fallback
-    final requestId = await _queueManager.enqueue(request);
+    // Queue the request and get the ID
+    final requestId = await _queueRequest(request);
 
     _smsTimers[requestId] = Timer(threshold, () async {
       // Check if network is still unavailable
@@ -281,6 +283,7 @@ class ResilientMiddleware {
       statusCode: 202,
       body: 'Request queued with SMS fallback in ${threshold.inMinutes} minutes',
       isFromCache: true,
+      requestId: requestId,
     );
   }
 
@@ -417,8 +420,8 @@ class ResilientMiddleware {
     );
   }
 
-  /// Queue a request
-  Future<void> _queueRequest(Request request) async {
+  /// Queue a request and return the request ID
+  Future<String> _queueRequest(Request request) async {
     final queueCount = await _queueManager.getQueueCount();
 
     if (queueCount >= _maxQueueSize) {
@@ -426,8 +429,9 @@ class ResilientMiddleware {
       throw Exception('Queue is full');
     }
 
-    await _queueManager.enqueue(request);
-    Logger.info('Request queued successfully');
+    final requestId = await _queueManager.enqueue(request);
+    Logger.info('Request queued successfully with ID: $requestId');
+    return requestId;
   }
 
   /// Configure resilient middleware with advanced options
