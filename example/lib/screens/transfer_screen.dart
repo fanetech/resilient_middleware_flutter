@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:resilient_middleware_flutter/resilient_middleware.dart';
-import '../models/transaction.dart';
-import 'dart:math';
+import '../config/app_config.dart';
 
 class TransferScreen extends StatefulWidget {
-  final double currentBalance;
-  final Function(Transaction) onTransferComplete;
+  final String userId;
+  final int currentBalance;
+  final VoidCallback onTransferComplete;
 
   const TransferScreen({
     super.key,
+    required this.userId,
     required this.currentBalance,
     required this.onTransferComplete,
   });
@@ -21,23 +22,48 @@ class _TransferScreenState extends State<TransferScreen> {
   final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
   final _recipientController = TextEditingController();
+  final _pinController = TextEditingController();
 
-  Priority _priority = Priority.normal;
+  late ResilientApiService _api;
   bool _smsEligible = true;
   bool _isLoading = false;
   String? _statusMessage;
+  bool _obscurePin = true;
+
+  // Available recipients from server
+  List<User> _availableUsers = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _api = ResilientApiService.getInstance(baseUrl: AppConfig.apiBaseUrl);
+    _loadUsers();
+  }
 
   @override
   void dispose() {
     _amountController.dispose();
     _recipientController.dispose();
+    _pinController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadUsers() async {
+    final result = await _api.getAllUsers();
+    if (result.isSuccess) {
+      setState(() {
+        // Filter out current user
+        _availableUsers = result.data!
+            .where((u) => u.userId != widget.userId)
+            .toList();
+      });
+    }
   }
 
   Future<void> _sendTransfer() async {
     if (!_formKey.currentState!.validate()) return;
 
-    final amount = double.parse(_amountController.text);
+    final amount = int.parse(_amountController.text);
     if (amount > widget.currentBalance) {
       _showError('Insufficient balance');
       return;
@@ -49,96 +75,161 @@ class _TransferScreenState extends State<TransferScreen> {
     });
 
     try {
-      // Demo API endpoint
-      final response = await ResilientHttp.post(
-        'https://jsonplaceholder.typicode.com/posts', // Demo API
-        body: {
-          'amount': amount,
-          'recipient': _recipientController.text,
-          'timestamp': DateTime.now().toIso8601String(),
-        },
-        priority: _priority,
-        smsEligible: _smsEligible,
-      );
-
-      Logger.info('Sending transfer request: $response');
-
-      // Create transaction - use requestId from response if queued
-      final transactionId = response.requestId ?? Random().nextInt(10000).toString();
-      final transaction = Transaction(
-        id: transactionId,
-        type: 'sent',
+      final result = await _api.transfer(
+        fromUserId: widget.userId,
+        toUserId: _recipientController.text.trim(),
         amount: amount,
-        recipient: _recipientController.text,
-        timestamp: DateTime.now(),
-        status: response.isFromCache
-            ? 'queued'
-            : response.isFromSMS
-                ? 'sms'
-                : 'completed',
-        isFromSMS: response.isFromSMS,
+        pin: _pinController.text,
+        useSMSFallback: _smsEligible,
       );
 
-      setState(() {
-        _isLoading = false;
-        if (response.isFromSMS) {
-          _statusMessage = '✅ Transfer sent via SMS!';
-        } else if (response.isFromCache) {
-          _statusMessage = '📦 Transfer queued - will process when online';
-        } else {
-          _statusMessage = '✅ Transfer completed successfully!';
+      if (result.isSuccess) {
+        final data = result.data!;
+        setState(() {
+          _isLoading = false;
+          _statusMessage = data.fromSMS
+              ? 'Transfer sent via SMS!'
+              : 'Transfer completed successfully!';
+        });
+
+        await _showResultDialog(
+          success: true,
+          amount: amount,
+          recipient: _recipientController.text,
+          newBalance: data.newBalance,
+          transactionRef: data.transactionRef,
+          fromSMS: data.fromSMS,
+        );
+
+        widget.onTransferComplete();
+
+        if (mounted) {
+          Navigator.pop(context);
         }
-      });
+      } else if (result.isQueued) {
+        setState(() {
+          _isLoading = false;
+          _statusMessage = 'Transfer queued - will process when online';
+        });
 
-      widget.onTransferComplete(transaction);
+        await _showResultDialog(
+          success: true,
+          amount: amount,
+          recipient: _recipientController.text,
+          queued: true,
+          queueId: result.queuedRequestId,
+        );
 
-      // Show result dialog
-      await _showResultDialog(transaction);
+        widget.onTransferComplete();
 
-      if (mounted) {
-        Navigator.pop(context);
+        if (mounted) {
+          Navigator.pop(context);
+        }
+      } else {
+        setState(() {
+          _isLoading = false;
+          _statusMessage = 'Transfer failed: ${result.message}';
+        });
+
+        _showError(result.message ?? 'Transfer failed');
       }
     } catch (e) {
       setState(() {
         _isLoading = false;
-        _statusMessage = '❌ Transfer failed: $e';
+        _statusMessage = 'Transfer failed: $e';
       });
+      _showError('Error: $e');
     }
   }
 
-  Future<void> _showResultDialog(Transaction transaction) async {
+  Future<void> _showResultDialog({
+    required bool success,
+    required int amount,
+    required String recipient,
+    int? newBalance,
+    String? transactionRef,
+    bool fromSMS = false,
+    bool queued = false,
+    String? queueId,
+  }) async {
     return showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
         icon: Icon(
-          transaction.status == 'completed'
-              ? Icons.check_circle
-              : transaction.status == 'sms'
-                  ? Icons.sms
-                  : Icons.schedule,
+          success
+              ? (queued ? Icons.schedule : Icons.check_circle)
+              : Icons.error,
           size: 48,
-          color: transaction.status == 'completed'
-              ? Colors.green
-              : Colors.orange,
+          color: success ? (queued ? Colors.orange : Colors.green) : Colors.red,
         ),
-        title: Text(transaction.statusDisplay),
+        title: Text(
+          success
+              ? (queued
+                  ? 'Transfer Queued'
+                  : (fromSMS ? 'Sent via SMS' : 'Transfer Complete'))
+              : 'Transfer Failed',
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Amount: ${transaction.amount.toStringAsFixed(0)} XOF'),
-            Text('Recipient: ${transaction.recipient}'),
-            const SizedBox(height: 8),
-            if (transaction.isFromSMS)
-              const Text(
-                'Your transaction was sent via SMS because internet connection was unavailable.',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+            Text('Amount: ${_formatAmount(amount)} FCFA'),
+            Text('To: $recipient'),
+            if (newBalance != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'New Balance: ${_formatAmount(newBalance)} FCFA',
+                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
-            if (transaction.status == 'queued')
-              const Text(
-                'Your transaction is queued and will be processed when internet becomes available.',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+            ],
+            if (transactionRef != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Ref: $transactionRef',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+            const SizedBox(height: 12),
+            if (fromSMS)
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.sms, size: 16, color: Colors.blue),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Sent via SMS fallback (no internet)',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (queued)
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.cloud_queue, size: 16, color: Colors.orange),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Will process automatically when online',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
               ),
           ],
         ),
@@ -159,6 +250,15 @@ class _TransferScreenState extends State<TransferScreen> {
         backgroundColor: Colors.red,
       ),
     );
+  }
+
+  String _formatAmount(int amount) {
+    if (amount >= 1000000) {
+      return '${(amount / 1000000).toStringAsFixed(1)}M';
+    } else if (amount >= 1000) {
+      return '${(amount / 1000).toStringAsFixed(0)}K';
+    }
+    return amount.toString();
   }
 
   @override
@@ -187,11 +287,11 @@ class _TransferScreenState extends State<TransferScreen> {
                         style: TextStyle(fontSize: 16),
                       ),
                       Text(
-                        '${widget.currentBalance.toStringAsFixed(0)} XOF',
-                        style: const TextStyle(
+                        '${_formatAmount(widget.currentBalance)} FCFA',
+                        style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
-                          color: Colors.blue,
+                          color: Colors.blue.shade700,
                         ),
                       ),
                     ],
@@ -200,18 +300,53 @@ class _TransferScreenState extends State<TransferScreen> {
               ),
               const SizedBox(height: 24),
 
-              // Recipient Input
+              // Recipient Selection
+              const Text(
+                'Select Recipient',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (_availableUsers.isNotEmpty) ...[
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _availableUsers.map((user) {
+                    final isSelected = _recipientController.text == user.userId;
+                    return ChoiceChip(
+                      label: Text(user.name ?? user.userId),
+                      selected: isSelected,
+                      onSelected: (selected) {
+                        setState(() {
+                          _recipientController.text = selected ? user.userId : '';
+                        });
+                      },
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Or enter User ID manually:',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
+              const SizedBox(height: 8),
               TextFormField(
                 controller: _recipientController,
                 decoration: const InputDecoration(
-                  labelText: 'Recipient',
-                  hintText: 'Enter recipient name or phone',
+                  labelText: 'Recipient User ID',
+                  hintText: 'e.g., USER7890',
                   prefixIcon: Icon(Icons.person),
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
                   if (value == null || value.isEmpty) {
                     return 'Please enter recipient';
+                  }
+                  if (value == widget.userId) {
+                    return 'Cannot transfer to yourself';
                   }
                   return null;
                 },
@@ -226,74 +361,82 @@ class _TransferScreenState extends State<TransferScreen> {
                   labelText: 'Amount',
                   hintText: 'Enter amount',
                   prefixIcon: Icon(Icons.money),
-                  suffixText: 'XOF',
+                  suffixText: 'FCFA',
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
                   if (value == null || value.isEmpty) {
                     return 'Please enter amount';
                   }
-                  final amount = double.tryParse(value);
+                  final amount = int.tryParse(value);
                   if (amount == null || amount <= 0) {
                     return 'Please enter valid amount';
                   }
                   if (amount > widget.currentBalance) {
                     return 'Insufficient balance';
                   }
+                  if (amount > 1000000) {
+                    return 'Max transfer: 1,000,000 FCFA';
+                  }
                   return null;
-                },
-              ),
-              const SizedBox(height: 24),
-
-              // Priority Selection
-              const Text(
-                'Priority',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 8),
-              SegmentedButton<Priority>(
-                segments: const [
-                  ButtonSegment(
-                    value: Priority.normal,
-                    label: Text('Normal'),
-                    icon: Icon(Icons.check),
-                  ),
-                  ButtonSegment(
-                    value: Priority.high,
-                    label: Text('High'),
-                    icon: Icon(Icons.priority_high),
-                  ),
-                  ButtonSegment(
-                    value: Priority.critical,
-                    label: Text('Critical'),
-                    icon: Icon(Icons.warning),
-                  ),
-                ],
-                selected: {_priority},
-                onSelectionChanged: (Set<Priority> newSelection) {
-                  setState(() {
-                    _priority = newSelection.first;
-                  });
                 },
               ),
               const SizedBox(height: 16),
 
-              // SMS Eligible Checkbox
-              CheckboxListTile(
-                title: const Text('Enable SMS fallback'),
-                subtitle: const Text(
-                  'Send via SMS if internet is unavailable',
-                  style: TextStyle(fontSize: 12),
+              // PIN Input
+              TextFormField(
+                controller: _pinController,
+                keyboardType: TextInputType.number,
+                maxLength: AppConfig.pinLength,
+                obscureText: _obscurePin,
+                decoration: InputDecoration(
+                  labelText: 'PIN',
+                  hintText: '${AppConfig.pinLength} digits',
+                  prefixIcon: const Icon(Icons.lock),
+                  border: const OutlineInputBorder(),
+                  counterText: '',
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _obscurePin ? Icons.visibility : Icons.visibility_off,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        _obscurePin = !_obscurePin;
+                      });
+                    },
+                  ),
                 ),
-                value: _smsEligible,
-                onChanged: (value) {
-                  setState(() {
-                    _smsEligible = value ?? true;
-                  });
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter PIN';
+                  }
+                  if (value.length != AppConfig.pinLength) {
+                    return 'PIN must be ${AppConfig.pinLength} digits';
+                  }
+                  return null;
                 },
+              ),
+              const SizedBox(height: 16),
+
+              // SMS Fallback Option
+              Card(
+                child: CheckboxListTile(
+                  title: const Text('Enable SMS fallback'),
+                  subtitle: const Text(
+                    'Send via SMS if internet is unavailable',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  secondary: Icon(
+                    Icons.sms,
+                    color: _smsEligible ? Colors.blue : Colors.grey,
+                  ),
+                  value: _smsEligible,
+                  onChanged: (value) {
+                    setState(() {
+                      _smsEligible = value ?? true;
+                    });
+                  },
+                ),
               ),
               const SizedBox(height: 24),
 

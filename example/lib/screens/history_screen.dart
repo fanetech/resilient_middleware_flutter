@@ -1,49 +1,132 @@
 import 'package:flutter/material.dart';
-import '../models/transaction.dart';
+import 'package:resilient_middleware_flutter/resilient_middleware.dart';
+import '../config/app_config.dart';
 
-class HistoryScreen extends StatelessWidget {
-  final List<Transaction> transactions;
+class HistoryScreen extends StatefulWidget {
+  final String userId;
 
   const HistoryScreen({
     super.key,
-    required this.transactions,
+    required this.userId,
   });
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  late ResilientApiService _api;
+  List<Transaction> _transactions = [];
+  bool _isLoading = true;
+  bool _hasMore = true;
+  int _offset = 0;
+  static const int _limit = 20;
+
+  @override
+  void initState() {
+    super.initState();
+    _api = ResilientApiService.getInstance(baseUrl: AppConfig.apiBaseUrl);
+    _loadTransactions();
+  }
+
+  Future<void> _loadTransactions({bool loadMore = false}) async {
+    if (!loadMore) {
+      setState(() {
+        _isLoading = true;
+        _offset = 0;
+        _transactions = [];
+      });
+    }
+
+    final result = await _api.getHistory(
+      userId: widget.userId,
+      limit: _limit,
+      offset: _offset,
+    );
+
+    if (result.isSuccess) {
+      setState(() {
+        if (loadMore) {
+          _transactions.addAll(result.data!.transactions);
+        } else {
+          _transactions = result.data!.transactions;
+        }
+        _hasMore = result.data!.hasMore;
+        _isLoading = false;
+      });
+    } else {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_hasMore && !_isLoading) {
+      _offset += _limit;
+      await _loadTransactions(loadMore: true);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Transaction History'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadTransactions,
+          ),
+        ],
       ),
-      body: transactions.isEmpty
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.history, size: 64, color: Colors.grey),
-                  SizedBox(height: 16),
-                  Text(
-                    'No transactions yet',
-                    style: TextStyle(
-                      fontSize: 18,
-                      color: Colors.grey,
-                    ),
+      body: _isLoading && _transactions.isEmpty
+          ? const Center(child: CircularProgressIndicator())
+          : _transactions.isEmpty
+              ? const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.history, size: 64, color: Colors.grey),
+                      SizedBox(height: 16),
+                      Text(
+                        'No transactions yet',
+                        style: TextStyle(
+                          fontSize: 18,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: transactions.length,
-              itemBuilder: (context, index) {
-                return _buildTransactionCard(transactions[index]);
-              },
-            ),
+                )
+              : RefreshIndicator(
+                  onRefresh: _loadTransactions,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _transactions.length + (_hasMore ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == _transactions.length) {
+                        // Load more button
+                        return Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: ElevatedButton(
+                              onPressed: _loadMore,
+                              child: const Text('Load More'),
+                            ),
+                          ),
+                        );
+                      }
+                      return _buildTransactionCard(_transactions[index]);
+                    },
+                  ),
+                ),
     );
   }
 
   Widget _buildTransactionCard(Transaction transaction) {
-    final isReceived = transaction.type == 'received';
+    final isReceived = transaction.toUserId == widget.userId;
+    final otherParty = isReceived ? transaction.fromUserId : transaction.toUserId;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -74,9 +157,7 @@ class HistoryScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        isReceived
-                            ? 'From ${transaction.recipient}'
-                            : 'To ${transaction.recipient}',
+                        isReceived ? 'From $otherParty' : 'To $otherParty',
                         style: const TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 16,
@@ -84,7 +165,7 @@ class HistoryScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        _formatDateTime(transaction.timestamp),
+                        _formatDateTime(transaction.createdAt),
                         style: const TextStyle(
                           color: Colors.grey,
                           fontSize: 12,
@@ -94,7 +175,7 @@ class HistoryScreen extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  '${isReceived ? '+' : '-'}${transaction.amount.toStringAsFixed(0)} XOF',
+                  '${isReceived ? '+' : '-'}${_formatAmount(transaction.amount ?? 0)} FCFA',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 18,
@@ -110,12 +191,11 @@ class HistoryScreen extends StatelessWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: _getStatusColor(transaction.status)
-                        .withOpacity(0.1),
+                    color: _getStatusColor(transaction.status).withOpacity(0.1),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Text(
-                    transaction.statusDisplay,
+                    _getStatusText(transaction.status),
                     style: TextStyle(
                       color: _getStatusColor(transaction.status),
                       fontSize: 12,
@@ -123,37 +203,28 @@ class HistoryScreen extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (transaction.isFromSMS) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.sms, size: 12, color: Colors.blue),
-                        SizedBox(width: 4),
-                        Text(
-                          'via SMS',
-                          style: TextStyle(
-                            color: Colors.blue,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    transaction.type,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                ],
+                ),
               ],
             ),
             const SizedBox(height: 8),
             Text(
-              'Transaction ID: ${transaction.id}',
+              'ID: ${transaction.transactionId}',
               style: const TextStyle(
                 color: Colors.grey,
                 fontSize: 11,
@@ -165,19 +236,38 @@ class HistoryScreen extends StatelessWidget {
     );
   }
 
+  String _formatAmount(int amount) {
+    if (amount >= 1000000) {
+      return '${(amount / 1000000).toStringAsFixed(1)}M';
+    } else if (amount >= 1000) {
+      return '${(amount / 1000).toStringAsFixed(0)}K';
+    }
+    return amount.toString();
+  }
+
   Color _getStatusColor(String status) {
     switch (status) {
-      case 'completed':
+      case 'COMPLETED':
         return Colors.green;
-      case 'pending':
-      case 'queued':
+      case 'PENDING':
         return Colors.orange;
-      case 'failed':
+      case 'FAILED':
         return Colors.red;
-      case 'sms':
-        return Colors.blue;
       default:
         return Colors.grey;
+    }
+  }
+
+  String _getStatusText(String status) {
+    switch (status) {
+      case 'COMPLETED':
+        return 'Completed';
+      case 'PENDING':
+        return 'Pending';
+      case 'FAILED':
+        return 'Failed';
+      default:
+        return status;
     }
   }
 

@@ -1,17 +1,21 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:resilient_middleware_flutter/resilient_middleware.dart';
-import 'screens/home_screen.dart';
+import 'config/app_config.dart';
+import 'screens/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Resilient Middleware
-  await ResilientMiddleware.initialize(
-    smsGateway: '+22670000000', // Demo SMS gateway number
-    enableSMS: false,
+  // Load environment variables
+  await dotenv.load(fileName: '.env');
+
+  // Initialize Resilient API Service with middleware
+  await ResilientApiService.initialize(
+    baseUrl: AppConfig.apiBaseUrl,
+    smsGateway: AppConfig.smsGatewayNumber,
+    enableSMS: true,
     strategy: ResilienceStrategy.balanced,
-    timeout: const Duration(seconds: 30),
-    maxQueueSize: 1000,
   );
 
   // Enable logging
@@ -27,7 +31,7 @@ class BankingDemoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Resilient Banking Demo',
+      title: 'Resilient Banking',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.blue,
@@ -45,7 +49,7 @@ class BankingDemoApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const HomeScreen(),
+      home: const LoginScreen(),
       debugShowCheckedModeBanner: false,
     );
   }

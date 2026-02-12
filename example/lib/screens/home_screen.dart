@@ -1,132 +1,109 @@
 import 'package:flutter/material.dart';
 import 'package:resilient_middleware_flutter/resilient_middleware.dart';
+import '../config/app_config.dart';
 import '../widgets/network_indicator.dart';
-import '../models/transaction.dart';
 import 'transfer_screen.dart';
 import 'history_screen.dart';
 import 'settings_screen.dart';
+import 'login_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final LoginResponse user;
+
+  const HomeScreen({
+    super.key,
+    required this.user,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  double _balance = 50000.0; // Demo balance
-  final List<Transaction> _recentTransactions = [];
+  late ResilientApiService _api;
+  int _balance = 0;
+  List<Transaction> _recentTransactions = [];
+  bool _isLoading = true;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-    _loadDemoData();
-    _setupQueueListener();
+    _api = ResilientApiService.getInstance(baseUrl: AppConfig.apiBaseUrl);
+    _api.onSessionExpired = _onSessionExpired;
+    _balance = widget.user.balance;
+    _loadData();
   }
 
-  @override
-  void dispose() {
-    // Remove the callbacks when disposing
-    QueueManager().onRequestCompleted = null;
-    super.dispose();
+  void _onSessionExpired() {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Session expired. Please login again.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (context) => const LoginScreen()),
+      );
+    }
   }
 
-  /// Setup listener for queue completion events
-  void _setupQueueListener() {
-    final queueManager = QueueManager();
-
-    // Listen for successful queue completions
-    queueManager.onRequestCompleted = (requestId, statusCode, body) {
-      Logger.info('Queue request completed: $requestId with status $statusCode');
-
-      // Find the queued transaction and update its status
-      setState(() {
-        for (int i = 0; i < _recentTransactions.length; i++) {
-          final tx = _recentTransactions[i];
-          // Match by ID (transaction ID now equals request ID for queued items)
-          if (tx.id == requestId && tx.status == 'queued') {
-            _recentTransactions[i] = Transaction(
-              id: tx.id,
-              type: tx.type,
-              amount: tx.amount,
-              recipient: tx.recipient,
-              timestamp: tx.timestamp,
-              status: 'completed',
-              isFromSMS: tx.isFromSMS,
-            );
-            // Deduct balance for newly completed transaction
-            _balance -= tx.amount;
-            Logger.info('Transaction ${tx.id} updated to completed');
-            break;
-          }
-        }
-      });
-    };
-
-    // Listen for failed queue requests
-    queueManager.onRequestFailed = (requestId, error) {
-      Logger.warning('Queue request failed: $requestId - $error');
-
-      setState(() {
-        for (int i = 0; i < _recentTransactions.length; i++) {
-          final tx = _recentTransactions[i];
-          if (tx.id == requestId && tx.status == 'queued') {
-            // Keep as queued if it will retry, or mark as failed if max retries reached
-            if (error == 'Max retries reached') {
-              _recentTransactions[i] = Transaction(
-                id: tx.id,
-                type: tx.type,
-                amount: tx.amount,
-                recipient: tx.recipient,
-                timestamp: tx.timestamp,
-                status: 'failed',
-                isFromSMS: tx.isFromSMS,
-              );
-            }
-            break;
-          }
-        }
-      });
-    };
-  }
-
-  void _loadDemoData() {
-    // Add some demo transactions
-    _recentTransactions.addAll([
-      Transaction(
-        id: '001',
-        type: 'received',
-        amount: 15000,
-        recipient: 'John Doe',
-        timestamp: DateTime.now().subtract(const Duration(hours: 2)),
-        status: 'completed',
-      ),
-      Transaction(
-        id: '002',
-        type: 'sent',
-        amount: 5000,
-        recipient: 'Jane Smith',
-        timestamp: DateTime.now().subtract(const Duration(hours: 5)),
-        status: 'completed',
-      ),
-      Transaction(
-        id: '003',
-        type: 'sent',
-        amount: 2500,
-        recipient: 'Bob Johnson',
-        timestamp: DateTime.now().subtract(const Duration(days: 1)),
-        status: 'completed',
-      ),
-    ]);
-  }
-
-  void _onTransferComplete(Transaction transaction) {
+  Future<void> _loadData() async {
     setState(() {
-      _recentTransactions.insert(0, transaction);
-      if (transaction.status == 'completed') {
-        _balance -= transaction.amount;
-      }
+      _isLoading = true;
+      _errorMessage = null;
     });
+
+    try {
+      // Fetch balance using stored PIN
+      final balanceResult = await _api.getBalance(
+        userId: widget.user.userId,
+        pin: _api.currentPin ?? '',
+      );
+
+      if (balanceResult.isSuccess) {
+        setState(() {
+          _balance = balanceResult.data!.balance;
+        });
+      }
+
+      // Fetch transaction history
+      final historyResult = await _api.getHistory(
+        userId: widget.user.userId,
+        limit: 10,
+      );
+
+      if (historyResult.isSuccess) {
+        setState(() {
+          _recentTransactions = historyResult.data!.transactions;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'Error loading data: $e';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _logout() async {
+    _api.logout();
+    if (mounted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (context) => const LoginScreen()),
+      );
+    }
+  }
+
+  void _onTransferComplete() {
+    // Reload data after transfer
+    _loadData();
   }
 
   @override
@@ -138,9 +115,9 @@ class _HomeScreenState extends State<HomeScreen> {
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: const NetworkIndicator(),
+          const Padding(
+            padding: EdgeInsets.all(8.0),
+            child: NetworkIndicator(),
           ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -153,18 +130,30 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             },
           ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: _logout,
+          ),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: () async {
-          setState(() {});
-        },
+        onRefresh: _loadData,
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // User greeting
+              Text(
+                'Welcome, ${widget.user.name ?? widget.user.userId}',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 16),
+
               // Balance Card
               _buildBalanceCard(),
               const SizedBox(height: 24),
@@ -172,6 +161,24 @@ class _HomeScreenState extends State<HomeScreen> {
               // Quick Actions
               _buildQuickActions(),
               const SizedBox(height: 24),
+
+              // Error Message
+              if (_errorMessage != null)
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.warning, color: Colors.orange.shade700),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(_errorMessage!)),
+                    ],
+                  ),
+                ),
 
               // Recent Transactions
               _buildRecentTransactions(),
@@ -185,6 +192,7 @@ class _HomeScreenState extends State<HomeScreen> {
             context,
             MaterialPageRoute(
               builder: (context) => TransferScreen(
+                userId: widget.user.userId,
                 currentBalance: _balance,
                 onTransferComplete: _onTransferComplete,
               ),
@@ -221,24 +229,41 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              'XOF ${_balance.toStringAsFixed(0)}',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+            _isLoading
+                ? const SizedBox(
+                    height: 32,
+                    width: 32,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : Text(
+                    '${_formatAmount(_balance)} FCFA',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
             const SizedBox(height: 16),
-            const Row(
+            Row(
               children: [
-                Icon(Icons.security, color: Colors.white70, size: 16),
-                SizedBox(width: 4),
-                Text(
+                const Icon(Icons.security, color: Colors.white70, size: 16),
+                const SizedBox(width: 4),
+                const Text(
                   'Works offline with SMS fallback',
                   style: TextStyle(
                     color: Colors.white70,
                     fontSize: 12,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  'ID: ${widget.user.userId}',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 10,
                   ),
                 ),
               ],
@@ -272,6 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     context,
                     MaterialPageRoute(
                       builder: (context) => TransferScreen(
+                        userId: widget.user.userId,
                         currentBalance: _balance,
                         onTransferComplete: _onTransferComplete,
                       ),
@@ -290,7 +316,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     context,
                     MaterialPageRoute(
                       builder: (context) => HistoryScreen(
-                        transactions: _recentTransactions,
+                        userId: widget.user.userId,
                       ),
                     ),
                   );
@@ -352,7 +378,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   context,
                   MaterialPageRoute(
                     builder: (context) => HistoryScreen(
-                      transactions: _recentTransactions,
+                      userId: widget.user.userId,
                     ),
                   ),
                 );
@@ -362,7 +388,9 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         const SizedBox(height: 12),
-        if (_recentTransactions.isEmpty)
+        if (_isLoading)
+          const Center(child: CircularProgressIndicator())
+        else if (_recentTransactions.isEmpty)
           const Card(
             child: Padding(
               padding: EdgeInsets.all(24),
@@ -375,7 +403,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           )
         else
-          ...(_recentTransactions.take(3).map((transaction) {
+          ...(_recentTransactions.take(5).map((transaction) {
             return _buildTransactionItem(transaction);
           })),
       ],
@@ -383,7 +411,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildTransactionItem(Transaction transaction) {
-    final isReceived = transaction.type == 'received';
+    final isReceived = transaction.toUserId == widget.user.userId;
+    final otherParty = isReceived ? transaction.fromUserId : transaction.toUserId;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
@@ -401,29 +431,69 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         title: Text(
-          isReceived ? 'From ${transaction.recipient}' : 'To ${transaction.recipient}',
+          isReceived ? 'From $otherParty' : 'To $otherParty',
           style: const TextStyle(fontWeight: FontWeight.w600),
         ),
-        subtitle: Text(
-          transaction.statusDisplay,
-          style: TextStyle(
-            fontSize: 12,
-            color: transaction.status == 'completed'
-                ? Colors.green
-                : transaction.status == 'failed'
-                    ? Colors.red
-                    : Colors.orange,
-          ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              transaction.type,
+              style: const TextStyle(fontSize: 11),
+            ),
+            Text(
+              _getStatusText(transaction.status),
+              style: TextStyle(
+                fontSize: 11,
+                color: _getStatusColor(transaction.status),
+              ),
+            ),
+          ],
         ),
         trailing: Text(
-          '${isReceived ? '+' : '-'}${transaction.amount.toStringAsFixed(0)} XOF',
+          '${isReceived ? '+' : '-'}${_formatAmount(transaction.amount ?? 0)} FCFA',
           style: TextStyle(
             fontWeight: FontWeight.bold,
             color: isReceived ? Colors.green : Colors.black87,
-            fontSize: 16,
+            fontSize: 14,
           ),
         ),
       ),
     );
+  }
+
+  String _formatAmount(int amount) {
+    if (amount >= 1000000) {
+      return '${(amount / 1000000).toStringAsFixed(1)}M';
+    } else if (amount >= 1000) {
+      return '${(amount / 1000).toStringAsFixed(0)}K';
+    }
+    return amount.toString();
+  }
+
+  String _getStatusText(String status) {
+    switch (status) {
+      case 'COMPLETED':
+        return 'Completed';
+      case 'PENDING':
+        return 'Pending...';
+      case 'FAILED':
+        return 'Failed';
+      default:
+        return status;
+    }
+  }
+
+  Color _getStatusColor(String status) {
+    switch (status) {
+      case 'COMPLETED':
+        return Colors.green;
+      case 'PENDING':
+        return Colors.orange;
+      case 'FAILED':
+        return Colors.red;
+      default:
+        return Colors.grey;
+    }
   }
 }

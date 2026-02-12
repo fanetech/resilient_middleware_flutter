@@ -69,6 +69,10 @@ export 'src/utils/sms_compressor.dart';
 // Database
 export 'src/database/offline_database.dart';
 
+// API Service for Resilient SMS Server
+export 'src/api/api_service.dart';
+export 'src/api/api_models.dart';
+
 import 'dart:convert';
 import 'package:resilient_middleware_flutter/src/utils/logger.dart';
 
