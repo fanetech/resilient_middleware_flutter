@@ -3,13 +3,13 @@ import 'package:resilient_middleware_flutter/resilient_middleware.dart';
 import '../config/app_config.dart';
 
 class TransferScreen extends StatefulWidget {
-  final String userId;
+  final String phone;
   final int currentBalance;
   final VoidCallback onTransferComplete;
 
   const TransferScreen({
     super.key,
-    required this.userId,
+    required this.phone,
     required this.currentBalance,
     required this.onTransferComplete,
   });
@@ -30,14 +30,10 @@ class _TransferScreenState extends State<TransferScreen> {
   String? _statusMessage;
   bool _obscurePin = true;
 
-  // Available recipients from server
-  List<User> _availableUsers = [];
-
   @override
   void initState() {
     super.initState();
     _api = ResilientApiService.getInstance(baseUrl: AppConfig.apiBaseUrl);
-    _loadUsers();
   }
 
   @override
@@ -46,18 +42,6 @@ class _TransferScreenState extends State<TransferScreen> {
     _recipientController.dispose();
     _pinController.dispose();
     super.dispose();
-  }
-
-  Future<void> _loadUsers() async {
-    final result = await _api.getAllUsers();
-    if (result.isSuccess) {
-      setState(() {
-        // Filter out current user
-        _availableUsers = result.data!
-            .where((u) => u.userId != widget.userId)
-            .toList();
-      });
-    }
   }
 
   Future<void> _sendTransfer() async {
@@ -75,9 +59,10 @@ class _TransferScreenState extends State<TransferScreen> {
     });
 
     try {
+      Logger.info('in_sendTransfer ');
       final result = await _api.transfer(
-        fromUserId: widget.userId,
-        toUserId: _recipientController.text.trim(),
+        from: widget.phone,
+        to: _recipientController.text.trim(),
         amount: amount,
         pin: _pinController.text,
         useSMSFallback: _smsEligible,
@@ -300,53 +285,19 @@ class _TransferScreenState extends State<TransferScreen> {
               ),
               const SizedBox(height: 24),
 
-              // Recipient Selection
-              const Text(
-                'Select Recipient',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 8),
-              if (_availableUsers.isNotEmpty) ...[
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _availableUsers.map((user) {
-                    final isSelected = _recipientController.text == user.userId;
-                    return ChoiceChip(
-                      label: Text(user.name ?? user.userId),
-                      selected: isSelected,
-                      onSelected: (selected) {
-                        setState(() {
-                          _recipientController.text = selected ? user.userId : '';
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Or enter User ID manually:',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
-                ),
-              ],
-              const SizedBox(height: 8),
+              // Recipient Phone Number
               TextFormField(
                 controller: _recipientController,
+                keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
-                  labelText: 'Recipient User ID',
-                  hintText: 'e.g., USER7890',
-                  prefixIcon: Icon(Icons.person),
+                  labelText: 'Recipient Phone Number',
+                  hintText: 'e.g., +22676543211',
+                  prefixIcon: Icon(Icons.phone),
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
                   if (value == null || value.isEmpty) {
-                    return 'Please enter recipient';
-                  }
-                  if (value == widget.userId) {
-                    return 'Cannot transfer to yourself';
+                    return 'Please enter recipient phone number';
                   }
                   return null;
                 },

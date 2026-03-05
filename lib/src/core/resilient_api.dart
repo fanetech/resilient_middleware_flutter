@@ -144,6 +144,7 @@ class ResilientMiddleware {
   /// 4. Score = 0.0 → Is Urgent? → Send SMS Immediately : Queue Request
   /// 5. Wait threshold → Still Offline? → Propose SMS
   Future<Response> execute(Request request) async {
+
     if (!_initialized) {
       throw Exception('ResilientMiddleware not initialized. Call initialize() first.');
     }
@@ -151,7 +152,8 @@ class ResilientMiddleware {
     Logger.info('Executing request: ${request.method} ${request.url} [Priority: ${request.priority.name}]');
 
     // Get network score
-    final networkScore = await _networkDetector.getNetworkScore();
+    //final networkScore = await _networkDetector.getNetworkScore();
+    final networkScore = 0.0;
     Logger.debug('Network score: $networkScore');
 
     // Apply strategy-based decision flow
@@ -160,6 +162,8 @@ class ResilientMiddleware {
 
   /// Apply decision flow based on network score and strategy
   Future<Response> _applyDecisionFlow(Request request, double networkScore) async {
+    Logger.info('_applyDecisionFlow — strategy: $_strategy, request: ${request.method} ${request.url}, priority: ${request.priority.name}, smsEligible: ${request.smsEligible}, networkScore: $networkScore');
+
     // AGGRESSIVE Strategy: Try HTTP first, quick SMS fallback
     if (_strategy == ResilienceStrategy.aggressive) {
       if (networkScore > 0.3) {
@@ -262,7 +266,7 @@ class ResilientMiddleware {
         if (queuedRequest != null) {
           // Check cost if provider is available
           if (_smsCostWarning && _smsCostProvider != null && _smsCostWarningCallback != null) {
-            final message = _smsGateway.compressRequest(queuedRequest);
+            final message = _smsGateway.buildSMSMessage(queuedRequest);
             final cost = await _smsCostProvider!(message);
             final approved = await _smsCostWarningCallback!(cost);
 
@@ -272,7 +276,11 @@ class ResilientMiddleware {
             }
           }
 
-          await _smsGateway.sendSMS(queuedRequest);
+          print('queuedRequestqueuedRequest: ${queuedRequest}');
+          final result = await _smsGateway.sendSMS(queuedRequest);
+          if (result.success) {
+            Logger.info('SMS fallback sent: ${result.smsText}');
+          }
         }
       }
 
@@ -398,17 +406,18 @@ class ResilientMiddleware {
       );
     }
 
-    // Queue and send via SMS
-    await _queueManager.enqueue(request);
-    final queuedRequest = await _queueManager.getPendingRequests(1);
+    // Queue and send via SMS — fetch the specific request by ID to avoid sending a wrong queued item
+    final requestId = await _queueManager.enqueue(request);
+    final allPending = await _queueManager.getPendingRequests(100);
+    final queuedRequest = allPending.where((r) => r.id == requestId).firstOrNull;
 
-    if (queuedRequest.isNotEmpty) {
-      final success = await _smsGateway.sendSMS(queuedRequest.first);
+    if (queuedRequest != null) {
+      final result = await _smsGateway.sendSMS(queuedRequest);
 
-      if (success) {
+      if (result.success) {
         return Response(
           statusCode: 200,
-          body: 'Request sent via SMS',
+          body: result.smsText,
           isFromSMS: true,
         );
       }

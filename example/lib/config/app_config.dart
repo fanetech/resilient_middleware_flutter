@@ -8,6 +8,9 @@ class AppConfig {
   static String get smsGatewayNumber =>
       dotenv.env['SMS_GATEWAY_NUMBER'] ?? '+22670000000';
 
+  static String get smsShortcode =>
+      dotenv.env['TWILIO_NUMBER'] ?? '+16615184543';
+
   static int get pinLength =>
       int.tryParse(dotenv.env['PIN_LENGTH'] ?? '6') ?? 6;
 }

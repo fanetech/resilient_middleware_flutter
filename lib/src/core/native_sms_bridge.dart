@@ -59,7 +59,11 @@ class NativeSMSBridge {
 
   /// Send SMS via native Android bridge
   Future<bool> sendSMS(String phoneNumber, String message) async {
+    Logger.info('[NativeSMSBridge] sendSMS called');
+    Logger.info('[NativeSMSBridge] phoneNumber: $phoneNumber');
+    Logger.info('[NativeSMSBridge] message:     $message');
     try {
+
       final result = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
         'sendSMS',
         {

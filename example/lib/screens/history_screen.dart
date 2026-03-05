@@ -39,7 +39,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
 
     final result = await _api.getHistory(
-      userId: widget.userId,
+      phone: widget.userId,
       limit: _limit,
       offset: _offset,
     );

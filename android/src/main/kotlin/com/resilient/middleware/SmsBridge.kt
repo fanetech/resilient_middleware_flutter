@@ -2,8 +2,13 @@ package com.resilient.middleware
 
 import android.Manifest
 import android.app.Activity
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.Build
 import android.telephony.SmsManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -14,7 +19,7 @@ import io.flutter.plugin.common.MethodChannel.Result
 
 /**
  * SMS Bridge for handling SMS sending and receiving
- * Communicates between Flutter and native Android SMS functionality
+ * Supports sending to Africa's Talking shortcodes (e.g. 6076)
  */
 class SmsBridge(
     private val context: Context,
@@ -24,8 +29,8 @@ class SmsBridge(
     companion object {
         const val CHANNEL_NAME = "com.resilient.middleware/sms"
         const val SMS_PERMISSION_REQUEST_CODE = 1001
+        private const val SMS_SENT_ACTION = "com.resilient.middleware.SMS_SENT"
 
-        // Permission names
         private val SMS_PERMISSIONS = arrayOf(
             Manifest.permission.SEND_SMS,
             Manifest.permission.RECEIVE_SMS,
@@ -46,7 +51,19 @@ class SmsBridge(
     }
 
     /**
-     * Send SMS message
+     * Get SmsManager compatible with all Android versions
+     */
+    private fun getSmsManagerCompat(): SmsManager {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(SmsManager::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            SmsManager.getDefault()
+        }
+    }
+
+    /**
+     * Send SMS message with sent confirmation via PendingIntent
      */
     private fun sendSMS(call: MethodCall, result: Result) {
         try {
@@ -62,7 +79,6 @@ class SmsBridge(
                 return
             }
 
-            // Check if we have SMS permission
             if (!hasPermissions()) {
                 result.error(
                     "PERMISSION_DENIED",
@@ -72,37 +88,93 @@ class SmsBridge(
                 return
             }
 
-            // Get SMS manager
-            val smsManager = SmsManager.getDefault()
+            val smsManager = getSmsManagerCompat()
 
-            // Check message length - split if necessary
+            // Create PendingIntent for sent confirmation
+            val sentIntent = PendingIntent.getBroadcast(
+                context,
+                0,
+                Intent(SMS_SENT_ACTION),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
+            // Register receiver to listen for sent confirmation
+            val sentReceiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    try {
+                        context.unregisterReceiver(this)
+                    } catch (_: Exception) {}
+
+                    when (resultCode) {
+                        Activity.RESULT_OK -> {
+                            result.success(mapOf(
+                                "success" to true,
+                                "message" to "SMS sent successfully",
+                                "phoneNumber" to phoneNumber,
+                                "messageLength" to message.length
+                            ))
+                        }
+                        SmsManager.RESULT_ERROR_NO_SERVICE -> {
+                            result.error(
+                                "NO_SERVICE",
+                                "No cellular service available",
+                                null
+                            )
+                        }
+                        SmsManager.RESULT_ERROR_RADIO_OFF -> {
+                            result.error(
+                                "RADIO_OFF",
+                                "Radio/cellular is turned off",
+                                null
+                            )
+                        }
+                        else -> {
+                            result.error(
+                                "SMS_SEND_FAILED",
+                                "SMS send failed with code: $resultCode",
+                                null
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(
+                    sentReceiver,
+                    IntentFilter(SMS_SENT_ACTION),
+                    Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                context.registerReceiver(
+                    sentReceiver,
+                    IntentFilter(SMS_SENT_ACTION)
+                )
+            }
+
+            // Send SMS (works with both phone numbers and shortcodes)
             if (message.length > 160) {
-                // Split long messages
                 val parts = smsManager.divideMessage(message)
+                val sentIntents = ArrayList<PendingIntent>(parts.size)
+                for (i in parts.indices) {
+                    sentIntents.add(sentIntent)
+                }
                 smsManager.sendMultipartTextMessage(
                     phoneNumber,
                     null,
                     parts,
-                    null,
+                    sentIntents,
                     null
                 )
             } else {
-                // Send single SMS
                 smsManager.sendTextMessage(
                     phoneNumber,
                     null,
                     message,
-                    null,
+                    sentIntent,
                     null
                 )
             }
-
-            result.success(mapOf(
-                "success" to true,
-                "message" to "SMS sent successfully",
-                "phoneNumber" to phoneNumber,
-                "messageLength" to message.length
-            ))
 
         } catch (e: SecurityException) {
             result.error(
@@ -151,7 +223,6 @@ class SmsBridge(
             return
         }
 
-        // Check if already granted
         if (hasPermissions()) {
             result.success(mapOf(
                 "granted" to true,
@@ -160,10 +231,8 @@ class SmsBridge(
             return
         }
 
-        // Store result for callback
         pendingResult = result
 
-        // Request permissions
         ActivityCompat.requestPermissions(
             activity,
             SMS_PERMISSIONS,
@@ -208,12 +277,5 @@ class SmsBridge(
                 permission
             ) == PackageManager.PERMISSION_GRANTED
         }
-    }
-
-    /**
-     * Get SMS manager instance
-     */
-    fun getSmsManager(): SmsManager {
-        return SmsManager.getDefault()
     }
 }

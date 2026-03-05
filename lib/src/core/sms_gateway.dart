@@ -1,4 +1,4 @@
-/// SMS gateway for fallback communication
+/// SMS gateway for fallback communication via Africa's Talking
 library;
 
 import 'dart:async';
@@ -6,9 +6,17 @@ import 'dart:io' show Platform;
 import 'package:permission_handler/permission_handler.dart';
 import '../models/queue_item.dart';
 import '../models/response_model.dart';
-import '../utils/sms_compressor.dart';
 import '../utils/logger.dart';
 import 'native_sms_bridge.dart';
+import 'transaction_sms_service.dart';
+
+/// Result of an SMS send operation
+class SMSSendResult {
+  final bool success;
+  final String smsText;
+
+  const SMSSendResult({required this.success, required this.smsText});
+}
 
 /// SMS Gateway for fallback communication
 class SMSGateway {
@@ -16,7 +24,8 @@ class SMSGateway {
   factory SMSGateway() => _instance;
   SMSGateway._internal();
 
-  static const String defaultGatewayNumber = '+22670000000';
+  static const String defaultGatewayNumber = '+16615184543';
+  static const int maxSMSLength = 160;
   String _gatewayNumber = defaultGatewayNumber;
 
   final StreamController<String> _responseController =
@@ -25,6 +34,9 @@ class SMSGateway {
   // Native SMS bridge for Android
   final NativeSMSBridge _nativeBridge = NativeSMSBridge();
   bool _nativeBridgeInitialized = false;
+
+  // Transaction SMS service (uses Twilio for TRANSFER commands)
+  final TransactionSmsService _txnSmsService = TransactionSmsService();
 
   /// Initialize SMS gateway
   Future<void> initialize() async {
@@ -50,7 +62,7 @@ class SMSGateway {
     }
   }
 
-  /// Set gateway number
+  /// Set gateway number (shortcode or phone number)
   void setGatewayNumber(String number) {
     _gatewayNumber = number;
     Logger.info('SMS gateway number set to: $number');
@@ -90,76 +102,111 @@ class SMSGateway {
     return await Permission.sms.isGranted;
   }
 
-  /// Send SMS for a queued request
-  Future<bool> sendSMS(QueuedRequest request) async {
+  /// Send SMS for a queued request.
+  ///
+  /// TRANSFER commands are routed to [TransactionSmsService] which sends to
+  /// the Twilio number using the format adapted from [buildSMSMessage]:
+  ///   T#<transactionId>#<amount>#<recipientPhone>#<pin>
+  ///
+  /// All other commands use [buildSMSMessage] and send to [_gatewayNumber].
+  ///
+  /// Returns [SMSSendResult] with success status and the SMS text that was sent.
+  Future<SMSSendResult> sendSMS(QueuedRequest request) async {
+    Logger.info('[SMSGateway] sendSMS — request: $request');
+    if (!Platform.isAndroid || !_nativeBridgeInitialized) {
+      Logger.warning('[SMSGateway] SMS sending only supported on Android');
+      final preview = buildSMSMessage(request);
+      return SMSSendResult(success: false, smsText: preview);
+    }
+
+    final command = _extractCommand(request);
+
+    // TRANSFER → TransactionSmsService (Twilio number)
+
+
+    // All other commands → buildSMSMessage + gateway number
+    final message = buildSMSMessage(request);
+    Logger.info('[SMSGateway] Sending: $message → $_gatewayNumber');
+
     try {
-      // Check permissions
-      if (!await hasPermissions()) {
-        Logger.warning('SMS permissions not granted');
-        return false;
+      if (message.length > maxSMSLength) {
+        Logger.error('[SMSGateway] Message too long: ${message.length} chars');
+        return SMSSendResult(success: false, smsText: message);
       }
 
-      // Compress request
-      final message = compressRequest(request);
-
-      // Validate message length
-      if (!SMSCompressor.isValidLength(message)) {
-        Logger.error('SMS message exceeds 160 characters: ${message.length}');
-        return false;
-      }
-
-      // Send SMS using native bridge (Android only)
-      if (!Platform.isAndroid || !_nativeBridgeInitialized) {
-        Logger.warning('SMS sending only supported on Android');
-        return false;
-      }
-
-      // Use native bridge for Android
+      Logger.info('_gatewayNumber: $_gatewayNumber');
+      Logger.info('_gatewayNumbermessage: $message');
       final success = await _nativeBridge.sendSMS(_gatewayNumber, message);
-
+      //final success = null;
       if (success) {
-        Logger.info('SMS sent successfully: $message');
+        Logger.info('[SMSGateway] SMS sent successfully');
+      } else {
+        Logger.warning('[SMSGateway] SMS send failed');
       }
-
-      return success;
+      return SMSSendResult(success: success, smsText: message);
     } catch (e, stackTrace) {
-      Logger.error('Failed to send SMS', e, stackTrace);
-      return false;
+      Logger.error('[SMSGateway] Failed to send SMS', e, stackTrace);
+      return SMSSendResult(success: false, smsText: message);
     }
   }
 
-  /// Compress request to SMS format
-  String compressRequest(QueuedRequest request) {
-    // Extract relevant data from request
-    // This is a simplified version - actual implementation will depend on request structure
+  /// Build SMS message from a queued request
+  /// Format: CMD#transactionId#amount#toUserId#pin
+  /// Example: T#TXN1707123456#5000#22660766010#22655000961#123456
+  String buildSMSMessage(QueuedRequest request) {
+    final command = _extractCommand(request);
+    final transactionId = _generateTransactionId();
+    final body = request.request.body;
+    Logger.info('[SMSGateway] buildSMSMessage — command: $command, transactionId: $transactionId, body: $body');
 
-    final data = <String, dynamic>{
-      'command': _extractCommand(request),
-      'id': request.id,
-      'amount': _extractAmount(request),
-      'user': _extractUser(request),
-      'auth': _extractAuth(request),
-    };
+    switch (command) {
+      case 'TRANSFER':
+        final amount = body?['amount']?.toString() ?? '0';
+        final from = body?['from']?.toString() ?? '';
+        final to = body?['to']?.toString() ?? '';
+        final pin = body?['pin']?.toString() ?? '';
+        return 'T#$transactionId#$amount#$from#$to#$pin';
 
-    return SMSCompressor.compress(data);
+      case 'PAYMENT':
+        final amount = body?['amount']?.toString() ?? '0';
+        final merchantId = body?['merchantId']?.toString() ?? '';
+        final pin = body?['pin']?.toString() ?? '';
+        return 'P#$transactionId#$amount#$merchantId#$pin';
+
+      case 'BALANCE':
+        // Balance params are in URL query string (GET request, no body)
+        // e.g. /api/transactions/balance?phone=+226...&pin=123456
+        final uri = Uri.tryParse(request.request.url);
+        final phone = uri?.queryParameters['phone'] ?? body?['phone']?.toString() ?? '';
+        final pin = uri?.queryParameters['pin'] ?? body?['pin']?.toString() ?? '';
+        Logger.info('[SMSGateway] BALANCE — phone: $phone, pin empty: ${pin.isEmpty}');
+        return 'B#$transactionId#$phone#$pin';
+
+      default:
+        return 'V#$transactionId';
+    }
   }
 
-  /// Parse SMS response
+  /// Generate a unique transaction ID: TXN + timestamp
+  String _generateTransactionId() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return 'TXN$now';
+  }
+
+  /// Parse incoming SMS response from server
   Response parseResponse(String smsBody) {
     try {
-      final data = SMSCompressor.decompress(smsBody);
-
       // Check if success or error
       if (smsBody.startsWith('OK#')) {
         return Response(
           statusCode: 200,
-          body: data.toString(),
+          body: smsBody,
           isFromSMS: true,
         );
       } else if (smsBody.startsWith('ERR#')) {
         return Response(
           statusCode: 400,
-          body: data.toString(),
+          body: smsBody,
           isFromSMS: true,
         );
       }
@@ -179,39 +226,18 @@ class SMSGateway {
     }
   }
 
-  /// Listen for SMS responses
+  /// Listen for incoming SMS responses
   Stream<String> listenForResponses() {
-    // TODO: Implement SMS receiver for incoming messages
-    // This will be implemented with native Android code in Step 6
     return _responseController.stream;
   }
 
-  /// Extract command from request
+  /// Extract command from request URL
   String _extractCommand(QueuedRequest request) {
-    // TODO: Implement command extraction based on URL/method
-    // This is a placeholder
-    if (request.request.url.contains('transfer')) return 'TRANSFER';
-    if (request.request.url.contains('payment')) return 'PAYMENT';
-    if (request.request.url.contains('balance')) return 'BALANCE';
+    final url = request.request.url.toLowerCase();
+    if (url.contains('transfer')) return 'TRANSFER';
+    if (url.contains('payment')) return 'PAYMENT';
+    if (url.contains('balance')) return 'BALANCE';
     return 'VERIFY';
-  }
-
-  /// Extract amount from request body
-  String _extractAmount(QueuedRequest request) {
-    // TODO: Extract from request body
-    return '';
-  }
-
-  /// Extract user from request body
-  String _extractUser(QueuedRequest request) {
-    // TODO: Extract from request body
-    return '';
-  }
-
-  /// Extract auth from request body
-  String _extractAuth(QueuedRequest request) {
-    // TODO: Extract from request body
-    return '';
   }
 
   /// Dispose resources

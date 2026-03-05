@@ -4,6 +4,7 @@ library;
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:resilient_middleware_flutter/resilient_middleware.dart';
 import '../core/resilient_api.dart';
 import '../models/request_model.dart';
 import 'api_models.dart';
@@ -16,6 +17,7 @@ class ResilientApiService {
   final ResilientMiddleware _middleware = ResilientMiddleware();
   String? _authToken;
   String? _currentUserId;
+  String? _currentPhone;
   String? _currentPin;
 
   /// Callback triggered when session expires (401 unauthorized).
@@ -61,6 +63,9 @@ class ResilientApiService {
 
   /// Get current user ID
   String? get currentUserId => _currentUserId;
+
+  /// Get current user phone number
+  String? get currentPhone => _currentPhone;
 
   /// Get stored PIN (for authenticated operations like balance check)
   String? get currentPin => _currentPin;
@@ -146,6 +151,7 @@ class ResilientApiService {
         final loginResponse = LoginResponse.fromJson(data['data']);
         _authToken = loginResponse.token;
         _currentUserId = loginResponse.userId;
+        _currentPhone = loginResponse.phone;
         _currentPin = pin;
         return ApiResponse.success(loginResponse);
       }
@@ -268,23 +274,23 @@ class ResilientApiService {
 
   /// Transfer money (with SMS fallback)
   Future<ApiResponse<TransferResult>> transfer({
-    required String fromUserId,
-    required String toUserId,
+    required String from,
+    required String to,
     required int amount,
     required String pin,
     bool useSMSFallback = true,
   }) async {
     if (useSMSFallback && _middleware.isInitialized) {
       return _transferWithFallback(
-        fromUserId: fromUserId,
-        toUserId: toUserId,
+        from: from,
+        to: to,
         amount: amount,
         pin: pin,
       );
     }
     return _transferDirect(
-      fromUserId: fromUserId,
-      toUserId: toUserId,
+      from: from,
+      to: to,
       amount: amount,
       pin: pin,
     );
@@ -292,8 +298,8 @@ class ResilientApiService {
 
   /// Direct HTTP transfer
   Future<ApiResponse<TransferResult>> _transferDirect({
-    required String fromUserId,
-    required String toUserId,
+    required String from,
+    required String to,
     required int amount,
     required String pin,
   }) async {
@@ -302,8 +308,8 @@ class ResilientApiService {
         Uri.parse('$baseUrl/api/transactions/transfer'),
         headers: _headers,
         body: jsonEncode({
-          'fromUserId': fromUserId,
-          'toUserId': toUserId,
+          'from': from,
+          'to': to,
           'amount': amount,
           'pin': pin,
         }),
@@ -330,29 +336,45 @@ class ResilientApiService {
 
   /// Transfer with SMS fallback via ResilientMiddleware
   Future<ApiResponse<TransferResult>> _transferWithFallback({
-    required String fromUserId,
-    required String toUserId,
+    required String from,
+    required String to,
     required int amount,
     required String pin,
   }) async {
+    Logger.info('in_transferWithFallback ');
     final request = Request(
       method: 'POST',
       url: '$baseUrl/api/transactions/transfer',
       body: {
-        'fromUserId': fromUserId,
-        'toUserId': toUserId,
+        'from': from,
+        'to': to,
         'amount': amount,
         'pin': pin,
       },
       headers: _headers,
-      priority: Priority.high,
+      priority: Priority.critical,
       smsEligible: true,
     );
 
     final response = await _middleware.execute(request);
 
     if (response.isFromSMS) {
-      // Parse SMS response
+      // Check if this is a sent confirmation (T#TXN...#amount#user#pin)
+      // or an incoming response (OK#ID#BAL:450K#TXN:A7F3B2)
+      if (response.body.startsWith('T#')) {
+        // SMS was sent - parse the sent SMS text to extract info
+        final parts = response.body.split('#');
+        return ApiResponse.success(TransferResult(
+          transactionId: parts.length > 1 ? parts[1] : 'unknown',
+          type: 'TRANSFER',
+          amount: parts.length > 2 ? (int.tryParse(parts[2]) ?? amount) : amount,
+          toUserId: to,
+          newBalance: 0,
+          transactionRef: parts.length > 1 ? parts[1] : 'unknown',
+          fromSMS: true,
+        ));
+      }
+      // Incoming SMS response from server
       return _parseSMSTransferResponse(response.body);
     }
 
@@ -374,7 +396,7 @@ class ResilientApiService {
 
   /// Payment (with SMS fallback)
   Future<ApiResponse<PaymentResult>> payment({
-    required String fromUserId,
+    required String from,
     required String merchantId,
     required int amount,
     required String pin,
@@ -382,14 +404,14 @@ class ResilientApiService {
   }) async {
     if (useSMSFallback && _middleware.isInitialized) {
       return _paymentWithFallback(
-        fromUserId: fromUserId,
+        from: from,
         merchantId: merchantId,
         amount: amount,
         pin: pin,
       );
     }
     return _paymentDirect(
-      fromUserId: fromUserId,
+      from: from,
       merchantId: merchantId,
       amount: amount,
       pin: pin,
@@ -398,7 +420,7 @@ class ResilientApiService {
 
   /// Direct HTTP payment
   Future<ApiResponse<PaymentResult>> _paymentDirect({
-    required String fromUserId,
+    required String from,
     required String merchantId,
     required int amount,
     required String pin,
@@ -408,7 +430,7 @@ class ResilientApiService {
         Uri.parse('$baseUrl/api/transactions/payment'),
         headers: _headers,
         body: jsonEncode({
-          'fromUserId': fromUserId,
+          'from': from,
           'merchantId': merchantId,
           'amount': amount,
           'pin': pin,
@@ -436,7 +458,7 @@ class ResilientApiService {
 
   /// Payment with SMS fallback
   Future<ApiResponse<PaymentResult>> _paymentWithFallback({
-    required String fromUserId,
+    required String from,
     required String merchantId,
     required int amount,
     required String pin,
@@ -445,7 +467,7 @@ class ResilientApiService {
       method: 'POST',
       url: '$baseUrl/api/transactions/payment',
       body: {
-        'fromUserId': fromUserId,
+        'from': from,
         'merchantId': merchantId,
         'amount': amount,
         'pin': pin,
@@ -458,6 +480,17 @@ class ResilientApiService {
     final response = await _middleware.execute(request);
 
     if (response.isFromSMS) {
+      if (response.body.startsWith('P#')) {
+        final parts = response.body.split('#');
+        return ApiResponse.success(PaymentResult(
+          transactionId: parts.length > 1 ? parts[1] : 'unknown',
+          type: 'PAYMENT',
+          amount: parts.length > 2 ? (int.tryParse(parts[2]) ?? amount) : amount,
+          merchantId: merchantId,
+          transactionRef: parts.length > 1 ? parts[1] : 'unknown',
+          fromSMS: true,
+        ));
+      }
       return _parseSMSPaymentResponse(response.body);
     }
 
@@ -478,24 +511,24 @@ class ResilientApiService {
 
   /// Get balance (with SMS fallback - critical priority)
   Future<ApiResponse<BalanceResult>> getBalance({
-    required String userId,
+    required String phone,
     required String pin,
     bool useSMSFallback = true,
   }) async {
     if (useSMSFallback && _middleware.isInitialized) {
-      return _getBalanceWithFallback(userId: userId, pin: pin);
+      return _getBalanceWithFallback(phone: phone, pin: pin);
     }
-    return _getBalanceDirect(userId: userId, pin: pin);
+    return _getBalanceDirect(phone: phone, pin: pin);
   }
 
   /// Direct HTTP balance check
   Future<ApiResponse<BalanceResult>> _getBalanceDirect({
-    required String userId,
+    required String phone,
     required String pin,
   }) async {
     try {
       final response = await http.get(
-        Uri.parse('$baseUrl/api/transactions/balance?userId=$userId&pin=$pin'),
+        Uri.parse('$baseUrl/api/transactions/balance?phone=$phone&pin=$pin'),
         headers: _headers,
       );
 
@@ -516,12 +549,12 @@ class ResilientApiService {
 
   /// Balance check with SMS fallback (critical - immediate SMS if offline)
   Future<ApiResponse<BalanceResult>> _getBalanceWithFallback({
-    required String userId,
+    required String phone,
     required String pin,
   }) async {
     final request = Request(
       method: 'GET',
-      url: '$baseUrl/api/transactions/balance?userId=$userId&pin=$pin',
+      url: '$baseUrl/api/transactions/balance?phone=$phone&pin=$pin',
       headers: _headers,
       priority: Priority.critical,
       smsEligible: true,
@@ -530,6 +563,14 @@ class ResilientApiService {
     final response = await _middleware.execute(request);
 
     if (response.isFromSMS) {
+      if (response.body.startsWith('B#')) {
+        // SMS was sent - balance will arrive via response SMS
+        return ApiResponse.success(BalanceResult(
+          userId: phone,
+          balance: 0,
+          fromSMS: true,
+        ));
+      }
       return _parseSMSBalanceResponse(response.body);
     }
 
@@ -550,13 +591,13 @@ class ResilientApiService {
 
   /// Get transaction history
   Future<ApiResponse<TransactionHistory>> getHistory({
-    required String userId,
+    required String phone,
     int limit = 20,
     int offset = 0,
   }) async {
     try {
       final response = await http.get(
-        Uri.parse('$baseUrl/api/transactions/history?userId=$userId&limit=$limit&offset=$offset'),
+        Uri.parse('$baseUrl/api/transactions/history?phone=$phone&limit=$limit&offset=$offset'),
         headers: _headers,
       );
 

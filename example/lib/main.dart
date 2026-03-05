@@ -13,7 +13,7 @@ void main() async {
   // Initialize Resilient API Service with middleware
   await ResilientApiService.initialize(
     baseUrl: AppConfig.apiBaseUrl,
-    smsGateway: AppConfig.smsGatewayNumber,
+    smsGateway: AppConfig.smsShortcode,
     enableSMS: true,
     strategy: ResilienceStrategy.balanced,
   );

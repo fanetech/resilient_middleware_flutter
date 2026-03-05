@@ -57,10 +57,11 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      // Fetch balance using stored PIN
+      // Fetch balance using stored PIN (no SMS fallback for auto-refresh)
       final balanceResult = await _api.getBalance(
-        userId: widget.user.userId,
+        phone: widget.user.phone ?? '',
         pin: _api.currentPin ?? '',
+        useSMSFallback: false,
       );
 
       if (balanceResult.isSuccess) {
@@ -71,7 +72,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       // Fetch transaction history
       final historyResult = await _api.getHistory(
-        userId: widget.user.userId,
+        phone: widget.user.phone ?? '',
         limit: 10,
       );
 
@@ -192,7 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
             context,
             MaterialPageRoute(
               builder: (context) => TransferScreen(
-                userId: widget.user.userId,
+                phone: widget.user.phone ?? '',
                 currentBalance: _balance,
                 onTransferComplete: _onTransferComplete,
               ),
@@ -297,7 +298,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     context,
                     MaterialPageRoute(
                       builder: (context) => TransferScreen(
-                        userId: widget.user.userId,
+                        phone: widget.user.phone ?? '',
                         currentBalance: _balance,
                         onTransferComplete: _onTransferComplete,
                       ),
