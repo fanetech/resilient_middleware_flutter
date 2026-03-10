@@ -5,7 +5,7 @@ import '../config/app_config.dart';
 class TransferScreen extends StatefulWidget {
   final String phone;
   final int currentBalance;
-  final VoidCallback onTransferComplete;
+  final void Function(int? newBalance) onTransferComplete;
 
   const TransferScreen({
     super.key,
@@ -86,7 +86,7 @@ class _TransferScreenState extends State<TransferScreen> {
           fromSMS: data.fromSMS,
         );
 
-        widget.onTransferComplete();
+        widget.onTransferComplete(data.newBalance > 0 ? data.newBalance : null);
 
         if (mounted) {
           Navigator.pop(context);
@@ -105,7 +105,7 @@ class _TransferScreenState extends State<TransferScreen> {
           queueId: result.queuedRequestId,
         );
 
-        widget.onTransferComplete();
+        widget.onTransferComplete(null);
 
         if (mounted) {
           Navigator.pop(context);

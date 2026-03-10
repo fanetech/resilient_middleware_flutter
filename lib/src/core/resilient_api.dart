@@ -415,11 +415,28 @@ class ResilientMiddleware {
       final result = await _smsGateway.sendSMS(queuedRequest);
 
       if (result.success) {
-        return Response(
-          statusCode: 200,
-          body: result.smsText,
-          isFromSMS: true,
-        );
+        // Wait for the server's reply SMS (parsed) with a 60-second timeout
+        try {
+          final serverResponse = await _smsGateway
+              .listenForResponses()
+              .first
+              .timeout(const Duration(seconds: 60));
+
+          // Transaction handled via SMS — remove from queue so it is not
+          // retried via HTTP when connectivity is restored.
+          await _queueManager.updateStatus(requestId, QueueStatus.completed);
+          await _queueManager.delete(requestId);
+          Logger.info('[ResilientMiddleware] SMS transaction complete, removed $requestId from queue');
+
+          return serverResponse;
+        } on TimeoutException {
+          Logger.warning('[ResilientMiddleware] No SMS response received within timeout');
+          return Response(
+            statusCode: 202,
+            body: result.smsText,
+            isFromSMS: true,
+          );
+        }
       }
     }
 

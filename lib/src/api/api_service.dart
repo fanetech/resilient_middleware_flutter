@@ -359,10 +359,9 @@ class ResilientApiService {
     final response = await _middleware.execute(request);
 
     if (response.isFromSMS) {
-      // Check if this is a sent confirmation (T#TXN...#amount#user#pin)
-      // or an incoming response (OK#ID#BAL:450K#TXN:A7F3B2)
+      // Timeout case: SMS was sent but server reply not received yet.
+      // Body is the raw sent SMS (e.g. T#TXN...#amount#from#to#pin)
       if (response.body.startsWith('T#')) {
-        // SMS was sent - parse the sent SMS text to extract info
         final parts = response.body.split('#');
         return ApiResponse.success(TransferResult(
           transactionId: parts.length > 1 ? parts[1] : 'unknown',
@@ -374,7 +373,7 @@ class ResilientApiService {
           fromSMS: true,
         ));
       }
-      // Incoming SMS response from server
+      // Server reply received — body is JSON from SmsResponse.toJson()
       return _parseSMSTransferResponse(response.body);
     }
 
@@ -641,94 +640,81 @@ class ResilientApiService {
 
   // ==================== SMS RESPONSE PARSERS ====================
 
-  /// Parse SMS transfer response: OK#ID#BAL:450K#TXN:A7F3B2
-  ApiResponse<TransferResult> _parseSMSTransferResponse(String smsBody) {
+  /// Parse SMS transfer response body (JSON from SmsResponse.toJson).
+  ///
+  /// Body example (success): {"isSuccess":true,"transactionId":"TXN...","balance":92000.0,"transactionRef":"4RHCD0"}
+  /// Body example (error):   {"isSuccess":false,"transactionId":"TXN...","errorCode":"INSUFFICIENT_FUNDS","errorDetails":{"BAL":10000.0}}
+  ApiResponse<TransferResult> _parseSMSTransferResponse(String body) {
     try {
-      final parts = smsBody.split('#');
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final isSuccess = json['isSuccess'] as bool? ?? false;
 
-      if (parts[0] == 'OK' && parts.length >= 4) {
-        final balPart = parts[2]; // BAL:450K
-        final txnPart = parts[3]; // TXN:A7F3B2
-
-        final balance = _parseAmountFromSMS(balPart.replaceFirst('BAL:', ''));
-        final txnRef = txnPart.replaceFirst('TXN:', '');
-
+      if (isSuccess) {
         return ApiResponse.success(TransferResult(
-          transactionId: parts[1],
+          transactionId: json['transactionId'] as String? ?? 'unknown',
           type: 'TRANSFER',
-          amount: 0, // Not included in SMS response
-          newBalance: balance,
-          transactionRef: txnRef,
+          amount: 0,
+          newBalance: (json['balance'] as num?)?.toInt() ?? 0,
+          transactionRef: json['transactionRef'] as String? ?? '',
           fromSMS: true,
         ));
       }
 
-      if (parts[0] == 'ERR') {
-        return ApiResponse.error(parts[2], 'Transaction failed via SMS');
-      }
-
-      return ApiResponse.error('SMS_PARSE_ERROR', 'Invalid SMS response format');
+      final errorCode = json['errorCode'] as String? ?? 'TRANSFER_FAILED';
+      final errorDetails = (json['errorDetails'] as Map?)?.cast<String, dynamic>();
+      return ApiResponse.error(errorCode, 'Transaction failed via SMS', data: errorDetails);
     } catch (e) {
       return ApiResponse.error('SMS_PARSE_ERROR', e.toString());
     }
   }
 
-  /// Parse SMS payment response
-  ApiResponse<PaymentResult> _parseSMSPaymentResponse(String smsBody) {
+  /// Parse SMS payment response body (JSON from SmsResponse.toJson).
+  ///
+  /// Body example: {"isSuccess":true,"transactionId":"TXN...","amountPaid":15000.0,"balance":435000.0,"transactionRef":"B7D2X1"}
+  ApiResponse<PaymentResult> _parseSMSPaymentResponse(String body) {
     try {
-      final parts = smsBody.split('#');
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final isSuccess = json['isSuccess'] as bool? ?? false;
 
-      if (parts[0] == 'OK' && parts.length >= 4) {
-        final paidPart = parts[2]; // PAID:15K
-        final txnPart = parts[3]; // TXN:B2C4D5
-
-        final paid = _parseAmountFromSMS(paidPart.replaceFirst('PAID:', ''));
-        final txnRef = txnPart.replaceFirst('TXN:', '');
-
+      if (isSuccess) {
         return ApiResponse.success(PaymentResult(
-          transactionId: parts[1],
+          transactionId: json['transactionId'] as String? ?? 'unknown',
           type: 'PAYMENT',
-          amount: paid,
-          transactionRef: txnRef,
+          amount: (json['amountPaid'] as num?)?.toInt() ?? 0,
+          newBalance: (json['balance'] as num?)?.toInt(),
+          transactionRef: json['transactionRef'] as String? ?? '',
           fromSMS: true,
         ));
       }
 
-      if (parts[0] == 'ERR') {
-        return ApiResponse.error(parts[2], 'Payment failed via SMS');
-      }
-
-      return ApiResponse.error('SMS_PARSE_ERROR', 'Invalid SMS response format');
+      final errorCode = json['errorCode'] as String? ?? 'PAYMENT_FAILED';
+      final errorDetails = (json['errorDetails'] as Map?)?.cast<String, dynamic>();
+      return ApiResponse.error(errorCode, 'Payment failed via SMS', data: errorDetails);
     } catch (e) {
       return ApiResponse.error('SMS_PARSE_ERROR', e.toString());
     }
   }
 
-  /// Parse SMS balance response: OK#ID#BAL:475K#CREDIT:25K
-  ApiResponse<BalanceResult> _parseSMSBalanceResponse(String smsBody) {
+  /// Parse SMS balance response body (JSON from SmsResponse.toJson).
+  ///
+  /// Body example: {"isSuccess":true,"transactionId":"TXN...","balance":435000.0,"credit":0.0}
+  ApiResponse<BalanceResult> _parseSMSBalanceResponse(String body) {
     try {
-      final parts = smsBody.split('#');
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final isSuccess = json['isSuccess'] as bool? ?? false;
 
-      if (parts[0] == 'OK' && parts.length >= 3) {
-        final balPart = parts[2]; // BAL:475K
-        final creditPart = parts.length > 3 ? parts[3] : 'CREDIT:0';
-
-        final balance = _parseAmountFromSMS(balPart.replaceFirst('BAL:', ''));
-        final credit = _parseAmountFromSMS(creditPart.replaceFirst('CREDIT:', ''));
-
+      if (isSuccess) {
         return ApiResponse.success(BalanceResult(
-          userId: parts[1],
-          balance: balance,
-          credit: credit,
+          userId: json['transactionId'] as String? ?? '',
+          balance: (json['balance'] as num?)?.toInt() ?? 0,
+          credit: (json['credit'] as num?)?.toInt() ?? 0,
           fromSMS: true,
         ));
       }
 
-      if (parts[0] == 'ERR') {
-        return ApiResponse.error(parts[2], 'Balance check failed via SMS');
-      }
-
-      return ApiResponse.error('SMS_PARSE_ERROR', 'Invalid SMS response format');
+      final errorCode = json['errorCode'] as String? ?? 'BALANCE_INQUIRY_FAILED';
+      final errorDetails = (json['errorDetails'] as Map?)?.cast<String, dynamic>();
+      return ApiResponse.error(errorCode, 'Balance check failed via SMS', data: errorDetails);
     } catch (e) {
       return ApiResponse.error('SMS_PARSE_ERROR', e.toString());
     }

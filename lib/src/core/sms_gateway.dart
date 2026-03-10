@@ -2,10 +2,12 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:permission_handler/permission_handler.dart';
 import '../models/queue_item.dart';
 import '../models/response_model.dart';
+import '../models/sms_response.dart';
 import '../utils/logger.dart';
 import 'native_sms_bridge.dart';
 import 'transaction_sms_service.dart';
@@ -28,15 +30,13 @@ class SMSGateway {
   static const int maxSMSLength = 160;
   String _gatewayNumber = defaultGatewayNumber;
 
-  final StreamController<String> _responseController =
-      StreamController<String>.broadcast();
+  final StreamController<Response> _responseController =
+      StreamController<Response>.broadcast();
 
   // Native SMS bridge for Android
   final NativeSMSBridge _nativeBridge = NativeSMSBridge();
   bool _nativeBridgeInitialized = false;
 
-  // Transaction SMS service (uses Twilio for TRANSFER commands)
-  final TransactionSmsService _txnSmsService = TransactionSmsService();
 
   /// Initialize SMS gateway
   Future<void> initialize() async {
@@ -50,8 +50,9 @@ class SMSGateway {
         _nativeBridge.incomingMessages.listen((smsData) {
           final body = smsData['body'] as String?;
           if (body != null) {
-            _responseController.add(body);
             Logger.info('Incoming SMS response: $body');
+            final parsed = parseResponse(body);
+            _responseController.add(parsed);
           }
         });
 
@@ -118,11 +119,6 @@ class SMSGateway {
       final preview = buildSMSMessage(request);
       return SMSSendResult(success: false, smsText: preview);
     }
-
-    final command = _extractCommand(request);
-
-    // TRANSFER → TransactionSmsService (Twilio number)
-
 
     // All other commands → buildSMSMessage + gateway number
     final message = buildSMSMessage(request);
@@ -193,41 +189,42 @@ class SMSGateway {
     return 'TXN$now';
   }
 
-  /// Parse incoming SMS response from server
+  /// Parse incoming SMS response from server.
+  ///
+  /// Converts the compressed plain-text SMS format into a [Response] whose
+  /// [Response.body] is a JSON string of [SmsResponse.toJson].
   Response parseResponse(String smsBody) {
     try {
-      // Check if success or error
-      if (smsBody.startsWith('OK#')) {
-        return Response(
-          statusCode: 200,
-          body: smsBody,
-          isFromSMS: true,
-        );
-      } else if (smsBody.startsWith('ERR#')) {
+      final parsed = SmsResponse.parse(smsBody);
+
+      if (parsed == null) {
+        Logger.warning('[SMSGateway] Unrecognised SMS response: $smsBody');
         return Response(
           statusCode: 400,
-          body: smsBody,
+          body: jsonEncode({'error': 'PROCESSING_FAILED', 'raw': smsBody}),
           isFromSMS: true,
         );
       }
 
+      Logger.info('[SMSGateway] Parsed SMS response: $parsed');
+
       return Response(
-        statusCode: 200,
-        body: smsBody,
+        statusCode: parsed.httpStatusCode,
+        body: jsonEncode(parsed.toJson()),
         isFromSMS: true,
       );
     } catch (e) {
       Logger.error('Failed to parse SMS response', e);
       return Response(
         statusCode: 500,
-        body: 'Failed to parse SMS response',
+        body: jsonEncode({'error': 'PROCESSING_FAILED', 'raw': smsBody}),
         isFromSMS: true,
       );
     }
   }
 
-  /// Listen for incoming SMS responses
-  Stream<String> listenForResponses() {
+  /// Listen for incoming SMS responses (already parsed)
+  Stream<Response> listenForResponses() {
     return _responseController.stream;
   }
 

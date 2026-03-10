@@ -102,8 +102,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _onTransferComplete() {
-    // Reload data after transfer
+  void _onTransferComplete(int? newBalance) {
+    // Apply balance from SMS response immediately so the UI reflects it
+    // even when still offline, then reload to sync with server.
+    if (newBalance != null && newBalance > 0) {
+      setState(() {
+        _balance = newBalance;
+      });
+    }
     _loadData();
   }
 
